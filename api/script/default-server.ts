@@ -34,6 +34,34 @@ function bodyParserErrorHandler(err: any, req: express.Request, res: express.Res
   }
 }
 
+// Dev-only: ensure a local account + fixed access key exist so the CLI can be used
+// without OAuth. Gated behind the SEED_LOCAL_KEY env var; never runs in production.
+async function seedLocalAccount(storage: Storage, key: string): Promise<void> {
+  const email = "dev@local.test";
+  let accountId: string;
+  try {
+    const account = await storage.getAccountByEmail(email);
+    accountId = account.id!;
+  } catch (e) {
+    accountId = await storage.addAccount({ email, name: "Local Dev", createdTime: Date.now() } as any);
+  }
+
+  try {
+    await storage.getAccountIdFromAccessKey(key);
+    return; // key already present
+  } catch (e) {
+    await storage.addAccessKey(accountId, {
+      name: key,
+      friendlyName: "local-dev",
+      createdBy: "startup-seed",
+      createdTime: Date.now(),
+      expires: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000, // ~10 years
+      isSession: false,
+    } as any);
+    console.log(`[seed] Local access key ready for ${email}: ${key}`);
+  }
+}
+
 export function start(done: (err?: any, server?: express.Express, storage?: Storage) => void, useJsonStorage?: boolean): void {
   let storage: Storage;
   let isKeyVaultConfigured: boolean;
@@ -41,7 +69,7 @@ export function start(done: (err?: any, server?: express.Express, storage?: Stor
 
   q<void>(null)
     .then(async () => {
-      if (useJsonStorage) {
+      if (useJsonStorage || process.env.USE_JSON_STORAGE === "true") {
         storage = new JsonStorage();
       } else if (!process.env.AZURE_KEYVAULT_ACCOUNT) {
         storage = new AzureStorage();
@@ -56,6 +84,10 @@ export function start(done: (err?: any, server?: express.Express, storage?: Stor
         const keyvaultClient = new SecretClient(url, credential);
         const secret = await keyvaultClient.getSecret(`storage-${process.env.AZURE_STORAGE_ACCOUNT}`);
         storage = new AzureStorage(process.env.AZURE_STORAGE_ACCOUNT, secret);
+      }
+
+      if (process.env.SEED_LOCAL_KEY) {
+        await seedLocalAccount(storage, process.env.SEED_LOCAL_KEY);
       }
     })
     .then(() => {
